@@ -39,12 +39,21 @@ Write-Item "가상환경" $venv $(if ($venv) { ".venv 폴더 있음" } else { "�
 $precut = Join-Path $root ".venv\Scripts\precut.exe"
 $installed = Test-Path $precut
 $precutDetail = "아직 설치되지 않음. 1-설치하기 를 실행하세요"
+$canMerge = $false
 if ($installed) {
     $version = ""
     try { $version = (& $precut "--version" 2>&1) -join " " } catch { $version = "실행 실패" }
     $precutDetail = $version
+    try { $canMerge = ((& $precut "--help" 2>&1) -join " ") -match "--merge" } catch { $canMerge = $false }
 }
 Write-Item "precut" $installed $precutDetail
+if ($installed) {
+    Write-Item "이어붙이기" $canMerge $(if ($canMerge) {
+        "여러 영상을 한 시퀀스로 합칠 수 있습니다"
+    } else {
+        "옛 버전입니다. 새 ZIP을 받아 1-설치하기 를 다시 실행하세요"
+    })
+}
 
 Write-Host ""
 $logPath = Join-Path $root "precut-log.txt"

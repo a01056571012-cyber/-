@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "precut"
-version = "0.1.0"
+version = "0.2.0"
 description = "프리미어 프로용 무음 컷편집 · 소리 밸런스 · 자막 자동화 도구"
 readme = "README.md"
 requires-python = ">=3.10"
