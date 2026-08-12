@@ -42,6 +42,16 @@
 
 Python 3.10 이상과 ffmpeg가 필요합니다.
 
+**윈도우** — PowerShell에서 설치 스크립트를 실행하면 가상환경 생성부터 설치까지 한 번에 끝납니다.
+
+```powershell
+git clone <이 저장소>
+cd -
+powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
+```
+
+**macOS / Linux**
+
 ```bash
 git clone <이 저장소>
 cd -
@@ -62,7 +72,8 @@ ffmpeg를 직접 설치했다면 `pip install -e .` 만으로도 충분합니다
 ## 사용법
 
 ```bash
-precut 인터뷰.mp4
+precut 인터뷰.mp4          # 파일 하나
+precut ./촬영본             # 폴더 안의 영상 전부
 ```
 
 `인터뷰_precut/` 폴더에 결과가 생깁니다.
@@ -115,8 +126,9 @@ precut 인터뷰.mp4 -p gentle
 # 무음 기준을 직접 지정
 precut 인터뷰.mp4 --threshold-db -42 --min-silence 0.6
 
-# 여러 파일 한꺼번에
+# 여러 파일 · 폴더 한꺼번에
 precut *.mp4 --no-subtitles -o ./편집본
+precut "C:\Users\USER\Desktop\영상2" --no-subtitles
 ```
 
 ### 프리셋

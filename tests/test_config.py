@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from precut.cli import expand_inputs
 from precut.config import PRESETS, build_settings
 
 
@@ -65,3 +66,32 @@ def test_example_config_is_valid():
 def test_settings_serialize_to_json():
     payload = build_settings("vlog").to_dict()
     assert json.loads(json.dumps(payload, ensure_ascii=False))["shape"]["min_silence"] == 0.6
+
+
+def test_folder_input_expands_to_media_files(tmp_path: Path):
+    folder = tmp_path / "영상2"
+    folder.mkdir()
+    for name in ("a.mp4", "b.MOV", "c.wav", "메모.txt", "썸네일.jpg"):
+        (folder / name).write_bytes(b"")
+    (folder / "하위폴더").mkdir()
+
+    expanded, problems = expand_inputs([folder])
+    assert [p.name for p in expanded] == ["a.mp4", "b.MOV", "c.wav"]
+    assert problems == []
+
+
+def test_folder_without_media_is_reported(tmp_path: Path):
+    folder = tmp_path / "빈폴더"
+    folder.mkdir()
+    (folder / "메모.txt").write_text("", encoding="utf-8")
+    expanded, problems = expand_inputs([folder])
+    assert expanded == []
+    assert len(problems) == 1 and "찾지 못했습니다" in problems[0]
+
+
+def test_file_inputs_pass_through_untouched(tmp_path: Path):
+    video = tmp_path / "확장자없는영상"
+    video.write_bytes(b"")
+    expanded, problems = expand_inputs([video, tmp_path / "없는파일.mp4"])
+    assert expanded == [video, tmp_path / "없는파일.mp4"]
+    assert problems == []

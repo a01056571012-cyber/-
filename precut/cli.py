@@ -165,6 +165,34 @@ def apply_args(settings, args) -> None:
         output.render_audio = False
 
 
+MEDIA_SUFFIXES = frozenset(
+    {
+        ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".mxf", ".webm", ".wmv",
+        ".mts", ".m2ts", ".mpg", ".mpeg", ".flv", ".ts",
+        ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".wma",
+    }
+)
+
+
+def expand_inputs(paths: list[Path]) -> tuple[list[Path], list[str]]:
+    """폴더를 받으면 그 안의 미디어 파일로 펼친다."""
+    expanded: list[Path] = []
+    problems: list[str] = []
+    for path in paths:
+        if path.is_dir():
+            found = sorted(
+                child
+                for child in path.iterdir()
+                if child.is_file() and child.suffix.lower() in MEDIA_SUFFIXES
+            )
+            if not found:
+                problems.append(f"{path}: 폴더 안에서 영상·오디오 파일을 찾지 못했습니다")
+            expanded.extend(found)
+        else:
+            expanded.append(path)
+    return expanded, problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -176,10 +204,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet and not args.json:
             print(f"  · {message}", file=sys.stderr, flush=True)
 
-    reports = []
-    failures = 0
+    inputs, problems = expand_inputs(args.inputs)
+    for problem in problems:
+        print(f"[오류] {problem}", file=sys.stderr)
 
-    for path in args.inputs:
+    reports = []
+    failures = len(problems)
+
+    for path in inputs:
         try:
             settings = build_settings(args.preset, args.config)
             apply_args(settings, args)
