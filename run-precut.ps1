@@ -7,6 +7,10 @@ param([string]$Path = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+$logPath = Join-Path $root "precut-log.txt"
+try { Start-Transcript -Path $logPath -Append | Out-Null } catch { }
+
+
 function Write-Step($message) { Write-Host "`n== $message" -ForegroundColor Cyan }
 function Write-Ok($message)   { Write-Host "   $message" -ForegroundColor Green }
 
@@ -96,3 +100,9 @@ try {
     Write-Host ""
     Write-Host "이 메시지를 그대로 복사해서 물어보시면 도와드릴 수 있습니다." -ForegroundColor DarkGray
 }
+
+Write-Host ""
+Write-Host "----------------------------------------------------------" -ForegroundColor DarkGray
+Write-Host "위 내용을 확인하세요. 아무 키나 누르면 창이 닫힙니다." -ForegroundColor DarkGray
+Write-Host "기록은 이 파일에 남아 있습니다: $logPath" -ForegroundColor DarkGray
+try { Stop-Transcript | Out-Null } catch { }

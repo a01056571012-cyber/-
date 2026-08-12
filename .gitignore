@@ -13,6 +13,7 @@ htmlcov/
 *_precut/
 precut-*/
 filtergraph.txt
+precut-log.txt
 
 # 샘플 미디어
 *.mp4
