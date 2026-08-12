@@ -1,0 +1,84 @@
+{
+  "_설명": "precut 설정 예시. 필요한 항목만 남기고 지워도 됩니다. precut 영상.mp4 -c 이파일.json",
+
+  "detect": {
+    "threshold_db": null,
+    "hysteresis_db": 4.0,
+    "noise_margin_db": 9.0,
+    "hop_ms": 10.0,
+    "window_ms": 30.0,
+    "analysis_rate": 16000
+  },
+
+  "shape": {
+    "lead_in": 0.12,
+    "lead_out": 0.22,
+    "min_silence": 0.45,
+    "min_clip": 0.3,
+    "max_silence_keep": 0.0,
+    "head_pad": 0.0
+  },
+
+  "balance": {
+    "enabled": true,
+    "target_lufs": -16.0,
+    "strength": 0.75,
+    "max_boost_db": 9.0,
+    "max_cut_db": 9.0,
+    "reference": "program"
+  },
+
+  "subtitles": {
+    "max_chars_per_line": 20,
+    "max_lines": 2,
+    "min_duration": 1.0,
+    "max_duration": 6.0,
+    "max_cps": 11.0,
+    "min_gap": 0.08,
+    "split_pause": 0.45,
+    "lead_out": 0.15,
+    "split_on_sentence": true,
+    "strip_fillers": true
+  },
+
+  "transcribe": {
+    "model": "medium",
+    "language": "ko",
+    "device": "auto",
+    "compute_type": "auto",
+    "beam_size": 5,
+    "vad_filter": true,
+    "initial_prompt": null
+  },
+
+  "xml": {
+    "sequence_name": "precut sequence",
+    "audio_transition_frames": 4,
+    "video_transition_frames": 0,
+    "include_audio_levels": true,
+    "audio_track_count": null
+  },
+
+  "render": {
+    "fade_seconds": 0.02,
+    "target_i": -16.0,
+    "target_tp": -1.5,
+    "target_lra": 11.0,
+    "video_codec": "libx264",
+    "crf": 20,
+    "preset": "veryfast",
+    "audio_bitrate": "192k"
+  },
+
+  "output": {
+    "write_xml": true,
+    "write_edl": false,
+    "write_jsx": true,
+    "write_srt": true,
+    "write_vtt": false,
+    "write_report": true,
+    "render_preview": false,
+    "render_audio": false,
+    "burn_subtitles": false
+  }
+}

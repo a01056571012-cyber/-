@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 작업 결과물
+*_precut/
+precut-*/
+filtergraph.txt
+
+# 샘플 미디어
+*.mp4
+*.mov
+*.mxf
+*.wav
+*.mp3
+*.m4a
+!tests/fixtures/*
