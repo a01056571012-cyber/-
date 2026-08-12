@@ -82,9 +82,29 @@ function Invoke-Precut {
         return
     }
 
-    $subtitleAnswer = Read-Host "자막도 만들까요? (Y/N, 처음 한 번은 인식 모델 약 1.5GB를 내려받습니다)"
+    $subtitleAnswer = Read-Host "자막도 만들까요? (Y/N)"
     $options = $mergeOption + @("--preset", $preset)
-    if ($subtitleAnswer -notmatch "^[Yy]") { $options += "--no-subtitles" }
+    if ($subtitleAnswer -match "^[Yy]") {
+        Write-Step "자막 정확도 고르기"
+        Write-Host "   1. 빠름   (small)     10분 영상에 약 3~8분, 모델 0.5GB (기본)"
+        Write-Host "   2. 보통   (medium)    10분 영상에 약 8~20분, 모델 1.5GB"
+        Write-Host "   3. 정확   (large-v3)  10분 영상에 30분 이상, 모델 3GB"
+        Write-Host "   그래픽카드(NVIDIA)가 없으면 1번을 권합니다."
+        $modelChoice = Read-Host "번호 (그냥 Enter 치면 1)"
+        $model = switch ($modelChoice) {
+            "2" { "medium" }
+            "3" { "large-v3" }
+            default { "small" }
+        }
+        $options += @("--model", $model)
+        Write-Ok $model
+        Write-Host ""
+        Write-Host "음성 인식은 이 프로그램에서 가장 오래 걸리는 단계입니다." -ForegroundColor Yellow
+        Write-Host "처음 한 번은 인식 모델을 내려받느라 몇 분 더 걸립니다." -ForegroundColor Yellow
+        Write-Host "진행률이 표시되니 창을 닫지 말고 기다려 주세요." -ForegroundColor Yellow
+    } else {
+        $options += "--no-subtitles"
+    }
 
     Write-Step "처리 중 (영상 길이에 따라 시간이 걸립니다)"
     & $precut $target $options

@@ -12,7 +12,7 @@ import pytest
 from precut.cli import main
 from precut.config import build_settings
 from precut.media import MediaError, find_ffmpeg, probe
-from precut.pipeline import run_pipeline
+from precut.pipeline import _transcribe_reporter, run_pipeline
 from precut.transcribe import Transcript, TranscriptionUnavailable, Utterance, Word
 
 # 말 2초 / 무음 2초를 반복하고, 6초 이후에는 목소리가 작아지는 12초짜리 샘플
@@ -322,3 +322,28 @@ def test_cli_without_merge_keeps_files_separate(sample_video, quiet_video, tmp_p
     assert len(reports) == 2
     assert all(report["merged"] is False for report in reports)
     assert len(list(outdir.glob("*.xml"))) == 2
+
+
+def test_transcribe_reporter_throttles_updates():
+    messages = []
+    report = _transcribe_reporter("a.mp4", lambda stage, text: messages.append(text), step=25)
+    for done in range(0, 101):
+        report(float(done), 100.0)
+    assert len(messages) == 4
+    assert "25%" in messages[0]
+    assert "100%" in messages[-1]
+    assert "a.mp4" in messages[0]
+
+
+def test_transcribe_reporter_ignores_unknown_duration():
+    messages = []
+    report = _transcribe_reporter("a.mp4", lambda stage, text: messages.append(text))
+    report(5.0, 0.0)
+    assert messages == []
+
+
+def test_transcribe_reporter_shows_remaining_time(sample_video, tmp_path):
+    messages = []
+    report = _transcribe_reporter("a.mp4", lambda stage, text: messages.append(text), step=50)
+    report(90.0, 180.0)
+    assert "1:30.0 / 3:00.0" in messages[0]

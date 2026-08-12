@@ -267,6 +267,30 @@ def run_pipeline(
             shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _transcribe_reporter(name: str, progress: Progress, step: int = 5):
+    """음성 인식 진행률을 일정 간격으로만 알린다.
+
+    이 단계는 몇 분에서 몇십 분까지 걸리는데 아무 표시가 없으면 멈춘 것처럼
+    보이기 때문에, 인식된 지점을 기준으로 진행률을 보여준다.
+    """
+    state = {"next": step}
+
+    def report(done: float, total: float) -> None:
+        if total <= 0:
+            return
+        percent = min(100, int(done / total * 100))
+        if percent < state["next"]:
+            return
+        state["next"] = percent - percent % step + step
+        progress(
+            "subtitle",
+            f"[{name}] 음성 인식 {percent}% "
+            f"({format_duration(done)} / {format_duration(total)})",
+        )
+
+    return report
+
+
 def _make_subtitles(analyses: list[SourceAnalysis], timeline: Timeline, settings: Settings,
                     progress: Progress, warnings: list[str],
                     supplied: Transcript | None) -> tuple[list[Cue], str]:
@@ -274,12 +298,19 @@ def _make_subtitles(analyses: list[SourceAnalysis], timeline: Timeline, settings
     cues: list[Cue] = []
     backend = ""
     for index, analysis in enumerate(analyses):
-        progress("subtitle", f"[{analysis.info.path.name}] 음성을 인식하는 중 (시간이 걸립니다)")
+        name = analysis.info.path.name
+        progress(
+            "subtitle",
+            f"[{name}] 인식 모델({settings.transcribe.model})을 준비하는 중 "
+            "— 처음 한 번은 내려받느라 몇 분 걸립니다",
+        )
         try:
             transcript = supplied if supplied is not None else transcribe(
-                analysis.wav, settings.transcribe
+                analysis.wav, settings.transcribe,
+                progress=_transcribe_reporter(name, progress),
             )
             backend = transcript.backend
+            progress("subtitle", f"[{name}] 음성 인식 완료")
             cues.extend(
                 build_cues(
                     transcript,
