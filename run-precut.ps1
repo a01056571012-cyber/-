@@ -38,6 +38,23 @@ function Invoke-Precut {
         throw "그런 파일이나 폴더가 없습니다: $target"
     }
 
+    $mergeOption = @()
+    if (Test-Path $target -PathType Container) {
+        Write-Step "여러 영상을 어떻게 처리할까요"
+        Write-Host "   1. 하나의 시퀀스로 이어붙이기 (기본)"
+        Write-Host "      - 영상들이 순서대로 이어진 타임라인 하나가 만들어집니다"
+        Write-Host "      - 영상들 사이의 음량 차이까지 함께 맞춥니다"
+        Write-Host "   2. 각각 따로 편집하기"
+        Write-Host "      - 영상마다 시퀀스가 하나씩 따로 만들어집니다"
+        $mergeChoice = Read-Host "번호 (그냥 Enter 치면 1)"
+        if ($mergeChoice -ne "2") {
+            $mergeOption = @("--merge")
+            Write-Ok "하나로 이어붙입니다"
+        } else {
+            Write-Ok "각각 따로 편집합니다"
+        }
+    }
+
     Write-Step "프리셋 고르기"
     Write-Host "   1. talking-head  인터뷰, 강좌 등 말하는 영상 (기본)"
     Write-Host "   2. vlog          현장음이 있는 브이로그"
@@ -55,7 +72,7 @@ function Invoke-Precut {
     Write-Ok $preset
 
     Write-Step "얼마나 잘리는지 먼저 확인합니다 (파일은 만들지 않음)"
-    & $precut $target "--preset" $preset "--no-subtitles" "--dry-run"
+    & $precut $target ($mergeOption + @("--preset", $preset, "--no-subtitles", "--dry-run"))
     if ($LASTEXITCODE -ne 0) { throw "분석에 실패했습니다. 위 메시지를 확인하세요." }
 
     Write-Host ""
@@ -66,7 +83,7 @@ function Invoke-Precut {
     }
 
     $subtitleAnswer = Read-Host "자막도 만들까요? (Y/N, 처음 한 번은 인식 모델 약 1.5GB를 내려받습니다)"
-    $options = @("--preset", $preset)
+    $options = $mergeOption + @("--preset", $preset)
     if ($subtitleAnswer -notmatch "^[Yy]") { $options += "--no-subtitles" }
 
     Write-Step "처리 중 (영상 길이에 따라 시간이 걸립니다)"

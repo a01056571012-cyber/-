@@ -2,6 +2,7 @@
 
 프리미어 프로 `파일 > 가져오기`로 이 XML을 열면 무음이 잘려나간 컷,
 컷마다 계산된 오디오 레벨, 컷 사이 크로스페이드가 그대로 재현된다.
+원본이 여럿이면 한 시퀀스에 순서대로 이어 붙인다.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ from pathlib import Path
 
 from ..loudness import db_to_linear
 from ..media import MediaInfo
-from ..segments import CutPlan
 from ..timecode import FrameRate
+from ..timeline import PlacedClip, Timeline, TimelineItem
 
 PPRO_TICKS_PER_SECOND = 254016000000
 MAX_AUDIO_LEVEL = 3.98109  # 프리미어 오디오 레벨 상한 (+12dB)
@@ -54,11 +55,13 @@ def _ticks(seconds: float) -> int:
     return int(round(seconds * PPRO_TICKS_PER_SECOND))
 
 
-def _file_element(parent: ET.Element, info: MediaInfo, frame_rate: FrameRate, file_id: str,
-                  audio_channels: int, *, full: bool) -> ET.Element:
+def _file_element(parent: ET.Element, info: MediaInfo, file_id: str, audio_channels: int,
+                  *, full: bool) -> ET.Element:
+    """파일은 처음 한 번만 전체 정의하고, 이후에는 id로만 참조한다."""
     if not full:
         return _sub(parent, "file", id=file_id)
 
+    frame_rate = info.frame_rate
     file_el = _sub(parent, "file", id=file_id)
     _sub(file_el, "name", info.path.name)
     _sub(file_el, "pathurl", info.path.resolve().as_uri())
@@ -124,11 +127,9 @@ def _links(parent: ET.Element, group_index: int, video_id: str | None, audio_ids
 def _transition(parent: ET.Element, frame_rate: FrameRate, cut_frame: int, frames: int,
                 media_type: str) -> None:
     half = frames / 2.0
-    start = int(round(cut_frame - half))
-    end = int(round(cut_frame + half))
     item = _sub(parent, "transitionitem")
-    _sub(item, "start", start)
-    _sub(item, "end", end)
+    _sub(item, "start", int(round(cut_frame - half)))
+    _sub(item, "end", int(round(cut_frame + half)))
     _sub(item, "alignment", "center")
     _sub(item, "cutPointTicks", _ticks(frame_rate.to_seconds(cut_frame)))
     _rate(item, frame_rate)
@@ -148,91 +149,108 @@ def _transition(parent: ET.Element, frame_rate: FrameRate, cut_frame: int, frame
     _sub(effect, "reverse", "FALSE")
 
 
-def _transition_frames(plan: CutPlan, index: int, requested: int) -> int:
-    """컷 양쪽에 남은 원본 여유(잘라낸 무음)만큼만 트랜지션을 건다."""
-    if requested <= 0 or index + 1 >= len(plan.segments):
+def _transition_frames(left: PlacedClip, right: PlacedClip, requested: int) -> int:
+    """컷 양쪽에 남은 원본 여유(잘라낸 무음)만큼만 트랜지션을 건다.
+
+    서로 다른 원본이 만나는 지점은 여유가 없으므로 하드컷으로 둔다.
+    """
+    if requested <= 0 or left.item_index != right.item_index:
         return 0
-    rate = plan.frame_rate
-    left = plan.segments[index]
-    right = plan.segments[index + 1]
-    gap_frames = rate.to_frames(right.source_in - left.source_out)
+    rate = left.item.info.frame_rate
+    gap_frames = rate.to_frames(right.segment.source_in - left.segment.source_out)
+    tail_frames = rate.to_frames(left.item.info.duration - left.segment.source_out)
     available = min(
         gap_frames,
-        rate.to_frames(left.duration) - 1,
-        rate.to_frames(right.duration) - 1,
-        rate.to_frames(plan.source_duration - left.source_out) * 2,
+        left.length_frames - 1,
+        right.length_frames - 1,
+        tail_frames * 2,
     )
     usable = min(requested, max(0, available))
     return usable if usable >= 2 else 0
 
 
-def render_fcpxml(plan: CutPlan, info: MediaInfo, options: FcpXmlOptions | None = None) -> str:
+def _add_transitions(track: ET.Element, timeline: Timeline, placed: list[PlacedClip],
+                     requested: int, media_type: str) -> None:
+    for left, right in zip(placed, placed[1:]):
+        frames = _transition_frames(left, right, requested)
+        if frames:
+            _transition(track, timeline.frame_rate, left.end_frame, frames, media_type)
+
+
+def _clip_common(clip: ET.Element, placed: PlacedClip, written_files: set[str],
+                 audio_channels: int) -> None:
+    item: TimelineItem = placed.item
+    info = item.info
+    source_rate = info.frame_rate
+    _sub(clip, "name", info.path.name)
+    _sub(clip, "enabled", "TRUE")
+    _sub(clip, "duration", source_rate.to_frames(info.duration))
+    _rate(clip, source_rate)
+    _sub(clip, "start", placed.start_frame)
+    _sub(clip, "end", placed.end_frame)
+    _sub(clip, "in", source_rate.to_frames(placed.segment.source_in))
+    _sub(clip, "out", source_rate.to_frames(placed.segment.source_out))
+    _sub(clip, "pproTicksIn", _ticks(placed.segment.source_in))
+    _sub(clip, "pproTicksOut", _ticks(placed.segment.source_out))
+    _file_element(clip, info, item.file_id, audio_channels, full=item.file_id not in written_files)
+    written_files.add(item.file_id)
+
+
+def render_fcpxml(timeline: Timeline, options: FcpXmlOptions | None = None) -> str:
     options = options or FcpXmlOptions()
-    rate = plan.frame_rate
-    audio_channels = options.audio_track_count or (info.audio_channels if info.has_audio else 0)
+    rate = timeline.frame_rate
+    placed = timeline.place()
+    audio_channels = options.audio_track_count
+    if audio_channels is None:
+        audio_channels = timeline.audio_channels
     audio_channels = min(max(audio_channels, 0), 2)
+
+    reference = timeline.video_reference
+    width = (reference.width if reference else 0) or 1920
+    height = (reference.height if reference else 0) or 1080
+    pixel_aspect = reference.pixel_aspect if reference else "square"
 
     root = ET.Element("xmeml", {"version": "4"})
     sequence = _sub(root, "sequence", id="sequence-1")
-    _sub(sequence, "name", options.sequence_name)
-    total_frames = sum(rate.to_frames(seg.duration) for seg in plan.segments)
-    _sub(sequence, "duration", total_frames)
+    _sub(sequence, "name", options.sequence_name or timeline.name)
+    _sub(sequence, "duration", timeline.total_frames)
     _rate(sequence, rate)
     _timecode(sequence, rate)
     media = _sub(sequence, "media")
 
-    file_written = False
+    written_files: set[str] = set()
 
     video = _sub(media, "video")
     format_el = _sub(video, "format")
     sample = _sub(format_el, "samplecharacteristics")
     _rate(sample, rate)
-    _sub(sample, "width", info.width or 1920)
-    _sub(sample, "height", info.height or 1080)
+    _sub(sample, "width", width)
+    _sub(sample, "height", height)
     _sub(sample, "anamorphic", "FALSE")
-    _sub(sample, "pixelaspectratio", "square" if info.pixel_aspect == "square" else info.pixel_aspect)
+    _sub(sample, "pixelaspectratio", "square" if pixel_aspect == "square" else pixel_aspect)
     _sub(sample, "fielddominance", "none")
     _sub(sample, "colordepth", 24)
 
-    video_track = _sub(video, "track")
-    video_ids: list[str] = []
-    timeline_frame = 0
-    frame_positions: list[tuple[int, int]] = []  # (start, end) in frames
+    def video_id(clip: PlacedClip) -> str:
+        return f"clipitem-v{clip.group_index}"
 
-    for index, segment in enumerate(plan.segments):
-        length = rate.to_frames(segment.duration)
-        frame_positions.append((timeline_frame, timeline_frame + length))
-        timeline_frame += length
-        video_ids.append(f"clipitem-v{index + 1}")
+    def audio_id(clip: PlacedClip, track_index: int) -> str:
+        return f"clipitem-a{track_index}-{clip.group_index}"
 
-    if info.has_video:
-        for index, segment in enumerate(plan.segments):
-            start, end = frame_positions[index]
-            clip = _sub(video_track, "clipitem", id=video_ids[index])
-            _sub(clip, "name", info.path.name)
-            _sub(clip, "enabled", "TRUE")
-            _sub(clip, "duration", rate.to_frames(info.duration))
-            _rate(clip, rate)
-            _sub(clip, "start", start)
-            _sub(clip, "end", end)
-            _sub(clip, "in", rate.to_frames(segment.source_in))
-            _sub(clip, "out", rate.to_frames(segment.source_out))
-            _sub(clip, "pproTicksIn", _ticks(segment.source_in))
-            _sub(clip, "pproTicksOut", _ticks(segment.source_out))
-            _sub(clip, "alphatype", "none")
-            _file_element(clip, info, rate, "file-1", audio_channels, full=not file_written)
-            file_written = True
+    if timeline.has_video:
+        video_track = _sub(video, "track")
+        video_clips = [clip for clip in placed if clip.item.info.has_video]
+        for clip in video_clips:
+            element = _sub(video_track, "clipitem", id=video_id(clip))
+            _clip_common(element, clip, written_files, audio_channels)
+            _sub(element, "alphatype", "none")
             _links(
-                clip,
-                index + 1,
-                video_ids[index],
-                [f"clipitem-a{track}-{index + 1}" for track in range(1, audio_channels + 1)],
+                element,
+                clip.group_index,
+                video_id(clip),
+                [audio_id(clip, t) for t in range(1, audio_channels + 1)],
             )
-        if options.video_transition_frames > 0:
-            for index in range(len(plan.segments) - 1):
-                frames = _transition_frames(plan, index, options.video_transition_frames)
-                if frames:
-                    _transition(video_track, rate, frame_positions[index][1], frames, "video")
+        _add_transitions(video_track, timeline, video_clips, options.video_transition_frames, "video")
         _sub(video_track, "enabled", "TRUE")
         _sub(video_track, "locked", "FALSE")
 
@@ -242,51 +260,36 @@ def render_fcpxml(plan: CutPlan, info: MediaInfo, options: FcpXmlOptions | None 
         audio_format = _sub(audio, "format")
         audio_sample = _sub(audio_format, "samplecharacteristics")
         _sub(audio_sample, "depth", 16)
-        _sub(audio_sample, "samplerate", info.audio_sample_rate or 48000)
+        _sub(audio_sample, "samplerate", timeline.sample_rate)
         outputs = _sub(audio, "outputs")
         for channel in (1, 2):
             group = _sub(outputs, "group")
             _sub(group, "index", channel)
             _sub(group, "numchannels", 1)
             _sub(group, "downmix", 0)
-            channel_el = _sub(group, "channel")
-            _sub(channel_el, "index", channel)
+            _sub(_sub(group, "channel"), "index", channel)
 
+        audio_clips = [clip for clip in placed if clip.item.info.has_audio]
         for track_index in range(1, audio_channels + 1):
             track = _sub(audio, "track", currentExplodedTrackIndex=str(track_index - 1),
                          totalExplodedTrackCount=str(audio_channels), premiereTrackType="Stereo")
-            for index, segment in enumerate(plan.segments):
-                start, end = frame_positions[index]
-                clip_id = f"clipitem-a{track_index}-{index + 1}"
-                clip = _sub(track, "clipitem", id=clip_id, premiereChannelType="stereo")
-                _sub(clip, "name", info.path.name)
-                _sub(clip, "enabled", "TRUE")
-                _sub(clip, "duration", rate.to_frames(info.duration))
-                _rate(clip, rate)
-                _sub(clip, "start", start)
-                _sub(clip, "end", end)
-                _sub(clip, "in", rate.to_frames(segment.source_in))
-                _sub(clip, "out", rate.to_frames(segment.source_out))
-                _sub(clip, "pproTicksIn", _ticks(segment.source_in))
-                _sub(clip, "pproTicksOut", _ticks(segment.source_out))
-                _file_element(clip, info, rate, "file-1", audio_channels, full=not file_written)
-                file_written = True
-                source_track = _sub(clip, "sourcetrack")
+            for clip in audio_clips:
+                element = _sub(track, "clipitem", id=audio_id(clip, track_index),
+                               premiereChannelType="stereo")
+                _clip_common(element, clip, written_files, audio_channels)
+                source_track = _sub(element, "sourcetrack")
                 _sub(source_track, "mediatype", "audio")
-                _sub(source_track, "trackindex", track_index)
+                # 모노 원본은 채널이 하나뿐이라 두 트랙 모두 1번 채널을 읽는다.
+                _sub(source_track, "trackindex", min(track_index, max(1, clip.item.info.audio_channels)))
                 _links(
-                    clip,
-                    index + 1,
-                    video_ids[index] if info.has_video else None,
-                    [f"clipitem-a{t}-{index + 1}" for t in range(1, audio_channels + 1)],
+                    element,
+                    clip.group_index,
+                    video_id(clip) if clip.item.info.has_video else None,
+                    [audio_id(clip, t) for t in range(1, audio_channels + 1)],
                 )
                 if options.include_audio_levels:
-                    _audio_level_filter(clip, segment.gain_db)
-            if options.audio_transition_frames > 0:
-                for index in range(len(plan.segments) - 1):
-                    frames = _transition_frames(plan, index, options.audio_transition_frames)
-                    if frames:
-                        _transition(track, rate, frame_positions[index][1], frames, "audio")
+                    _audio_level_filter(element, clip.segment.gain_db)
+            _add_transitions(track, timeline, audio_clips, options.audio_transition_frames, "audio")
             _sub(track, "enabled", "TRUE")
             _sub(track, "locked", "FALSE")
             _sub(track, "outputchannelindex", track_index)
@@ -296,8 +299,7 @@ def render_fcpxml(plan: CutPlan, info: MediaInfo, options: FcpXmlOptions | None 
     return '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n' + body + "\n"
 
 
-def write_fcpxml(plan: CutPlan, info: MediaInfo, path: Path,
-                 options: FcpXmlOptions | None = None) -> Path:
+def write_fcpxml(timeline: Timeline, path: Path, options: FcpXmlOptions | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_fcpxml(plan, info, options), encoding="utf-8")
+    path.write_text(render_fcpxml(timeline, options), encoding="utf-8")
     return path

@@ -9,6 +9,7 @@ from precut.exporters.jsx import render_jsx
 from precut.media import MediaInfo
 from precut.segments import ShapeOptions, shape_regions
 from precut.timecode import FrameRate
+from precut.timeline import build_timeline
 
 RATE = FrameRate(30)
 
@@ -38,12 +39,16 @@ def make_plan(regions=((1.0, 3.0), (6.0, 9.0), (12.0, 14.0)), duration=20.0):
     )
 
 
+def timeline_of(*pairs, name="precut sequence"):
+    return build_timeline(list(pairs), name=name)
+
+
 def parse(xml_text: str) -> ET.Element:
     return ET.fromstring(xml_text)
 
 
 def test_document_header_and_root(tmp_path):
-    text = render_fcpxml(make_plan(), make_info(tmp_path))
+    text = render_fcpxml(timeline_of((make_info(tmp_path), make_plan())))
     assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>')
     root = parse(text)
     assert root.tag == "xmeml" and root.get("version") == "4"
@@ -51,7 +56,7 @@ def test_document_header_and_root(tmp_path):
 
 def test_sequence_duration_matches_kept_frames(tmp_path):
     plan = make_plan()
-    root = parse(render_fcpxml(plan, make_info(tmp_path)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path), plan))))
     sequence = root.find("sequence")
     expected = sum(RATE.to_frames(segment.duration) for segment in plan.segments)
     assert int(sequence.findtext("duration")) == expected
@@ -61,7 +66,7 @@ def test_sequence_duration_matches_kept_frames(tmp_path):
 
 def test_video_clipitems_carry_source_in_out(tmp_path):
     plan = make_plan()
-    root = parse(render_fcpxml(plan, make_info(tmp_path)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path), plan))))
     clips = root.findall("sequence/media/video/track/clipitem")
     assert len(clips) == len(plan.segments)
     for clip, segment in zip(clips, plan.segments):
@@ -71,7 +76,7 @@ def test_video_clipitems_carry_source_in_out(tmp_path):
 
 def test_timeline_positions_are_contiguous(tmp_path):
     plan = make_plan()
-    root = parse(render_fcpxml(plan, make_info(tmp_path)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path), plan))))
     clips = root.findall("sequence/media/video/track/clipitem")
     cursor = 0
     for clip in clips:
@@ -81,7 +86,7 @@ def test_timeline_positions_are_contiguous(tmp_path):
 
 
 def test_file_is_defined_once_and_referenced_afterwards(tmp_path):
-    root = parse(render_fcpxml(make_plan(), make_info(tmp_path)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path), make_plan()))))
     files = root.findall(".//file")
     assert len(files) > 1
     full = [f for f in files if f.find("pathurl") is not None]
@@ -92,14 +97,14 @@ def test_file_is_defined_once_and_referenced_afterwards(tmp_path):
 
 def test_pathurl_is_percent_encoded(tmp_path):
     info = make_info(tmp_path)
-    root = parse(render_fcpxml(make_plan(), info))
+    root = parse(render_fcpxml(timeline_of((info, make_plan()))))
     pathurl = root.find(".//file/pathurl").text
     assert "%" in pathurl  # 한글 파일명이 URL 인코딩되어야 한다
     assert " " not in pathurl
 
 
 def test_audio_tracks_match_channel_count(tmp_path):
-    root = parse(render_fcpxml(make_plan(), make_info(tmp_path, channels=2)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path, channels=2), make_plan()))))
     tracks = root.findall("sequence/media/audio/track")
     assert len(tracks) == 2
     for index, track in enumerate(tracks, start=1):
@@ -108,13 +113,13 @@ def test_audio_tracks_match_channel_count(tmp_path):
 
 
 def test_mono_source_produces_single_audio_track(tmp_path):
-    root = parse(render_fcpxml(make_plan(), make_info(tmp_path, channels=1)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path, channels=1), make_plan()))))
     assert len(root.findall("sequence/media/audio/track")) == 1
 
 
 def test_audio_only_source_has_no_video_clips(tmp_path):
     info = make_info(tmp_path, channels=2, has_video=False)
-    root = parse(render_fcpxml(make_plan(), info))
+    root = parse(render_fcpxml(timeline_of((info, make_plan()))))
     assert root.findall("sequence/media/video/track/clipitem") == []
     assert root.findall("sequence/media/audio/track/clipitem")
 
@@ -124,7 +129,7 @@ def test_audio_level_filter_reflects_segment_gain(tmp_path):
     plan.segments[0].gain_db = 6.0
     plan.segments[1].gain_db = 0.0
     plan.segments[2].gain_db = -6.0
-    root = parse(render_fcpxml(plan, make_info(tmp_path, channels=1)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path, channels=1), plan))))
     clips = root.findall("sequence/media/audio/track/clipitem")
     values = [float(clip.find("filter/effect/parameter/value").text) for clip in clips]
     assert values[0] == pytest.approx(1.995, abs=0.01)
@@ -137,19 +142,19 @@ def test_audio_level_filter_reflects_segment_gain(tmp_path):
 def test_audio_level_is_clamped_to_premiere_range(tmp_path):
     plan = make_plan()
     plan.segments[0].gain_db = 40.0
-    root = parse(render_fcpxml(plan, make_info(tmp_path, channels=1)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path, channels=1), plan))))
     value = float(root.find("sequence/media/audio/track/clipitem/filter/effect/parameter/value").text)
     assert value == pytest.approx(3.98109, abs=0.001)
 
 
 def test_audio_levels_can_be_disabled(tmp_path):
     options = FcpXmlOptions(include_audio_levels=False)
-    root = parse(render_fcpxml(make_plan(), make_info(tmp_path), options))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path), make_plan())), options))
     assert root.findall(".//filter") == []
 
 
 def test_video_and_audio_clips_are_linked(tmp_path):
-    root = parse(render_fcpxml(make_plan(), make_info(tmp_path, channels=2)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path, channels=2), make_plan()))))
     first_video = root.find("sequence/media/video/track/clipitem")
     refs = [link.findtext("linkclipref") for link in first_video.findall("link")]
     assert refs == ["clipitem-v1", "clipitem-a1-1", "clipitem-a2-1"]
@@ -158,7 +163,7 @@ def test_video_and_audio_clips_are_linked(tmp_path):
 def test_audio_transitions_are_inserted_at_cuts(tmp_path):
     options = FcpXmlOptions(audio_transition_frames=4, video_transition_frames=0)
     plan = make_plan()
-    root = parse(render_fcpxml(plan, make_info(tmp_path, channels=1), options))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path, channels=1), plan)), options))
     transitions = root.findall("sequence/media/audio/track/transitionitem")
     assert len(transitions) == len(plan.segments) - 1
     first = transitions[0]
@@ -171,10 +176,10 @@ def test_audio_transitions_are_inserted_at_cuts(tmp_path):
 
 def test_video_transitions_are_optional(tmp_path):
     plan = make_plan()
-    without = parse(render_fcpxml(plan, make_info(tmp_path), FcpXmlOptions(video_transition_frames=0)))
+    without = parse(render_fcpxml(timeline_of((make_info(tmp_path), plan)), FcpXmlOptions(video_transition_frames=0)))
     assert without.findall("sequence/media/video/track/transitionitem") == []
     with_dissolve = parse(
-        render_fcpxml(plan, make_info(tmp_path), FcpXmlOptions(video_transition_frames=6))
+        render_fcpxml(timeline_of((make_info(tmp_path), plan)), FcpXmlOptions(video_transition_frames=6))
     )
     items = with_dissolve.findall("sequence/media/video/track/transitionitem")
     assert len(items) == len(plan.segments) - 1
@@ -191,7 +196,7 @@ def test_transition_is_limited_by_available_handles(tmp_path):
     )
     assert len(plan.segments) == 2
     root = parse(
-        render_fcpxml(plan, make_info(tmp_path, channels=1), FcpXmlOptions(audio_transition_frames=8))
+        render_fcpxml(timeline_of((make_info(tmp_path, channels=1), plan)), FcpXmlOptions(audio_transition_frames=8))
     )
     transitions = root.findall("sequence/media/audio/track/transitionitem")
     for item in transitions:
@@ -200,7 +205,7 @@ def test_transition_is_limited_by_available_handles(tmp_path):
 
 def test_single_segment_has_no_transitions(tmp_path):
     plan = make_plan(regions=((1.0, 5.0),))
-    root = parse(render_fcpxml(plan, make_info(tmp_path), FcpXmlOptions(audio_transition_frames=8)))
+    root = parse(render_fcpxml(timeline_of((make_info(tmp_path), plan)), FcpXmlOptions(audio_transition_frames=8)))
     assert root.findall(".//transitionitem") == []
 
 
@@ -213,14 +218,14 @@ def test_ntsc_rate_is_flagged(tmp_path):
         frame_rate=ntsc,
     )
     info = MediaInfo(**{**info.__dict__, "frame_rate": ntsc})
-    root = parse(render_fcpxml(plan, info))
+    root = parse(render_fcpxml(timeline_of((info, plan))))
     assert root.find("sequence/rate/ntsc").text == "TRUE"
     assert root.find("sequence/timecode/displayformat").text == "DF"
 
 
 def test_edl_lists_every_segment(tmp_path):
     plan = make_plan()
-    text = render_edl(plan, make_info(tmp_path))
+    text = render_edl(timeline_of((make_info(tmp_path), plan)))
     assert "TITLE: precut" in text
     assert text.count("FROM CLIP NAME") == len(plan.segments)
     assert "00:00:01:00 00:00:03:00" in text

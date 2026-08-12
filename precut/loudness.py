@@ -205,33 +205,42 @@ def weighted_median(pairs: list[tuple[float, float]]) -> float | None:
     return points[-1][1]
 
 
-def apply_segment_balance(
-    plan: CutPlan, track: LoudnessTrack, options: BalanceOptions
-) -> tuple[list[Segment], float | None]:
-    """각 컷의 라우드니스를 재서 gain_db를 채운다.
+def balance_plans(
+    pairs: list[tuple[CutPlan, LoudnessTrack]], options: BalanceOptions
+) -> tuple[float | None, float | None]:
+    """여러 원본의 컷을 한 기준으로 맞춘다. (기준값, 전체 라우드니스)를 돌려준다.
 
-    기준(reference)이 'program'이면 컷들의 (길이 가중) 중앙값에 맞추므로 너무 작은
-    구간은 올리고 너무 큰 구간은 내려 상대적인 균형이 잡힌다. 'target'이면 절대
-    목표 LUFS로 맞춘다. 중앙값을 쓰는 이유는 에너지 평균이 큰 소리에 끌려가서
+    기준(reference)이 'program'이면 모든 컷의 (길이 가중) 중앙값에 맞추므로 너무
+    작은 구간은 올리고 너무 큰 구간은 내려 상대적인 균형이 잡힌다. 'target'이면
+    절대 목표 LUFS로 맞춘다. 중앙값을 쓰는 이유는 에너지 평균이 큰 소리에 끌려가서
     작게 말한 구간이 그대로 남는 문제를 피하기 위해서다.
-    """
-    program = track.program_loudness()
-    if not options.enabled:
-        return plan.segments, program
 
-    for segment in plan.segments:
-        segment.loudness_lufs = track.segment_loudness(segment.source_in, segment.source_out)
+    여러 영상을 하나로 이어 붙일 때 이 함수를 한 번에 호출하면 영상들 사이의
+    음량 차이까지 같은 기준으로 맞춰진다.
+    """
+    all_samples: list[float] = []
+    for _, track in pairs:
+        all_samples.extend(sample.momentary for sample in track.samples)
+    program = gated_loudness(all_samples)
+
+    segments = [segment for plan, _ in pairs for segment in plan.segments]
+    if not options.enabled:
+        return None, program
+
+    for plan, track in pairs:
+        for segment in plan.segments:
+            segment.loudness_lufs = track.segment_loudness(segment.source_in, segment.source_out)
 
     reference = options.target_lufs
     if options.reference == "program":
         median = weighted_median(
-            [(seg.loudness_lufs, seg.duration) for seg in plan.segments if seg.loudness_lufs is not None]
+            [(seg.loudness_lufs, seg.duration) for seg in segments if seg.loudness_lufs is not None]
         )
         if median is not None:
             reference = median
 
     strength = max(0.0, min(1.0, options.strength))
-    for segment in plan.segments:
+    for segment in segments:
         measured = segment.loudness_lufs
         if measured is None or not math.isfinite(measured):
             segment.gain_db = 0.0
@@ -240,6 +249,14 @@ def apply_segment_balance(
         segment.gain_db = round(
             max(-options.max_cut_db, min(options.max_boost_db, correction)), 2
         )
+    return reference, program
+
+
+def apply_segment_balance(
+    plan: CutPlan, track: LoudnessTrack, options: BalanceOptions
+) -> tuple[list[Segment], float | None]:
+    """원본 하나짜리 편의 함수."""
+    _, program = balance_plans([(plan, track)], options)
     return plan.segments, program
 
 

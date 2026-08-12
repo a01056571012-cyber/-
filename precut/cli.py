@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -20,6 +21,7 @@ EPILOG = """
   precut 강의.mp4 --no-subtitles          컷과 소리 밸런스만
   precut a.mp4 --render-preview           확인용 미리보기 영상까지 렌더링
   precut a.mp4 --dry-run                  파일을 만들지 않고 컷 결과만 미리보기
+  precut ./영상폴더 --merge                폴더 안 영상을 하나의 시퀀스로 이어붙이기
 
 프리미어에서 열기:
   1) 만들어진 .xml 을 프리미어에서 파일 > 가져오기
@@ -42,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
         "-p", "--preset", default="talking-head", choices=sorted(PRESETS), help="영상 유형 프리셋"
     )
     parser.add_argument("-c", "--config", type=Path, help="JSON 설정 파일")
+    parser.add_argument(
+        "-m", "--merge", action="store_true",
+        help="여러 영상을 순서대로 이어붙여 하나의 시퀀스로 만듭니다",
+    )
+    parser.add_argument("--sequence-name", help="시퀀스 이름")
     parser.add_argument("--version", action="version", version=f"precut {__version__}")
 
     cut = parser.add_argument_group("컷 편집")
@@ -174,6 +181,12 @@ MEDIA_SUFFIXES = frozenset(
 )
 
 
+def natural_key(path: Path) -> list:
+    """'영상2'가 '영상10'보다 앞에 오도록 숫자를 숫자로 비교한다."""
+    parts = re.split(r"(\d+)", path.name.lower())
+    return [int(part) if part.isdigit() else part for part in parts]
+
+
 def expand_inputs(paths: list[Path]) -> tuple[list[Path], list[str]]:
     """폴더를 받으면 그 안의 미디어 파일로 펼친다."""
     expanded: list[Path] = []
@@ -181,9 +194,12 @@ def expand_inputs(paths: list[Path]) -> tuple[list[Path], list[str]]:
     for path in paths:
         if path.is_dir():
             found = sorted(
-                child
-                for child in path.iterdir()
-                if child.is_file() and child.suffix.lower() in MEDIA_SUFFIXES
+                (
+                    child
+                    for child in path.iterdir()
+                    if child.is_file() and child.suffix.lower() in MEDIA_SUFFIXES
+                ),
+                key=natural_key,
             )
             if not found:
                 problems.append(f"{path}: 폴더 안에서 영상·오디오 파일을 찾지 못했습니다")
@@ -211,15 +227,29 @@ def main(argv: list[str] | None = None) -> int:
     reports = []
     failures = len(problems)
 
-    for path in inputs:
+    if args.merge and len(inputs) < 2:
+        print("[알림] 이어붙일 영상이 하나뿐이라 그냥 처리합니다.", file=sys.stderr)
+
+    batches = [inputs] if args.merge else [[path] for path in inputs]
+
+    for batch in batches:
         try:
             settings = build_settings(args.preset, args.config)
             apply_args(settings, args)
             if not args.quiet and not args.json:
-                print(f"\n▶ {path}", file=sys.stderr, flush=True)
-            result = run_pipeline(path, settings, progress=progress)
+                if len(batch) > 1:
+                    listing = "\n".join(f"   {index}. {p.name}" for index, p in enumerate(batch, 1))
+                    print(f"\n▶ 영상 {len(batch)}개를 순서대로 이어붙입니다\n{listing}",
+                          file=sys.stderr, flush=True)
+                else:
+                    print(f"\n▶ {batch[0]}", file=sys.stderr, flush=True)
+            result = run_pipeline(
+                batch, settings, merge=len(batch) > 1,
+                sequence_name=args.sequence_name or "", progress=progress,
+            )
         except (MediaError, ValueError, FileNotFoundError) as exc:
-            print(f"[오류] {path}: {exc}", file=sys.stderr)
+            label = batch[0] if len(batch) == 1 else f"{len(batch)}개 묶음"
+            print(f"[오류] {label}: {exc}", file=sys.stderr)
             failures += 1
             continue
 

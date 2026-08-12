@@ -207,3 +207,118 @@ def test_subtitle_backend_missing_is_only_a_warning(sample_video, tmp_path, monk
 
 def _raise_unavailable(*args, **kwargs):
     raise TranscriptionUnavailable("자막 생성을 위해 faster-whisper 가 필요합니다.")
+
+
+@pytest.fixture(scope="session")
+def quiet_video(tmp_path_factory, ffmpeg) -> Path:
+    """앞의 샘플보다 전체적으로 작게 녹음된 8초짜리 두 번째 영상."""
+    path = tmp_path_factory.mktemp("media2") / "second.mp4"
+    expr = "0.05*sin(2*PI*220*t)*between(mod(t\\,4)\\,0\\,2)"
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=8",
+            "-f", "lavfi", "-i", f"aevalsrc='{expr}':d=8:s=44100:c=stereo",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def test_merge_puts_every_clip_in_one_sequence(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    result = run_pipeline([sample_video, quiet_video], settings, merge=True)
+
+    assert result.timeline.is_merged
+    assert len(result.timeline.items) == 2
+    # 12초 영상에서 3컷 + 8초 영상에서 2컷
+    assert len(result.timeline.place()) == 5
+    assert result.timeline.source_duration == pytest.approx(20.0, abs=0.5)
+
+    root = ET.fromstring(result.outputs["xml"].read_text(encoding="utf-8"))
+    clips = root.findall("sequence/media/video/track/clipitem")
+    assert len(clips) == 5
+    assert [c.findtext("name") for c in clips[:3]] == ["sample.mp4"] * 3
+    assert [c.findtext("name") for c in clips[3:]] == ["second.mp4"] * 2
+
+    cursor = 0
+    for clip in clips:
+        assert int(clip.findtext("start")) == cursor
+        cursor = int(clip.findtext("end"))
+    assert int(root.find("sequence").findtext("duration")) == cursor
+
+
+def test_merge_balances_volume_across_videos(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    result = run_pipeline([sample_video, quiet_video], settings, merge=True)
+
+    placed = result.timeline.place()
+    # 첫 영상의 앞 두 컷은 크게, 두 번째 영상은 통째로 작게 녹음되어 있다.
+    loud = [c.segment.gain_db for c in placed if c.item_index == 0][:2]
+    quiet = [c.segment.gain_db for c in placed if c.item_index == 1]
+    assert min(quiet) - max(loud) > 5.0
+
+    # 보정 뒤에는 컷들 사이의 음량 편차가 줄어야 한다.
+    before = [c.segment.loudness_lufs for c in placed]
+    after = [c.segment.loudness_lufs + c.segment.gain_db for c in placed]
+    assert max(after) - min(after) < max(before) - min(before)
+
+
+def test_merge_writes_a_single_output_set(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    result = run_pipeline([sample_video, quiet_video], settings, merge=True)
+    assert len(list((tmp_path / "out").glob("*.xml"))) == 1
+    report = json.loads(result.outputs["report"].read_text(encoding="utf-8"))
+    assert report["merged"] is True
+    assert len(report["sources"]) == 2
+    assert {segment["source"] for segment in report["segments"]} == {"sample.mp4", "second.mp4"}
+
+
+def test_merged_subtitles_are_offset_per_video(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    settings.make_subtitles = True
+    result = run_pipeline(
+        [sample_video, quiet_video], settings, merge=True, transcript=fake_transcript()
+    )
+    assert result.cues
+    for cue in result.cues:
+        assert 0 <= cue.start < cue.end <= result.timeline.duration + 1e-6
+    for left, right in zip(result.cues, result.cues[1:]):
+        assert left.start <= right.start
+    assert [cue.index for cue in result.cues] == list(range(1, len(result.cues) + 1))
+    # 두 번째 영상의 자막은 첫 영상이 끝난 뒤에 나온다.
+    first_video_end = result.timeline.place()[2].end_frame / result.timeline.frame_rate.fps
+    assert max(cue.start for cue in result.cues) > first_video_end
+
+
+def test_merge_skips_preview_rendering_with_a_warning(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    settings.output.render_preview = True
+    result = run_pipeline([sample_video, quiet_video], settings, merge=True)
+    assert "preview" not in result.outputs
+    assert any("이어붙일 때는" in warning for warning in result.warnings)
+    assert result.outputs["xml"].exists()
+
+
+def test_cli_merge_flag_produces_one_sequence(sample_video, quiet_video, tmp_path, capsys):
+    outdir = tmp_path / "merged"
+    code = main([str(sample_video), str(quiet_video), "--merge", "--no-subtitles",
+                 "--json", "-o", str(outdir)])
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["merged"] is True
+    assert report["cuts"] == 5
+    assert len(list(outdir.glob("*.xml"))) == 1
+
+
+def test_cli_without_merge_keeps_files_separate(sample_video, quiet_video, tmp_path, capsys):
+    outdir = tmp_path / "separate"
+    code = main([str(sample_video), str(quiet_video), "--no-subtitles", "--json", "-o", str(outdir)])
+    assert code == 0
+    reports = json.loads(capsys.readouterr().out)
+    assert len(reports) == 2
+    assert all(report["merged"] is False for report in reports)
+    assert len(list(outdir.glob("*.xml"))) == 2
