@@ -45,18 +45,19 @@ Python 3.10 이상과 ffmpeg가 필요합니다.
 **윈도우** — 명령어를 몰라도 됩니다.
 
 1. 저장소를 ZIP으로 받아 압축을 풉니다.
-2. 폴더 안에서 **`setup-windows.ps1`** 파일을 찾습니다.
+2. 폴더 안에서 **`1-설치하기`** 파일을 찾습니다.
    ZIP은 같은 이름의 폴더가 이중으로 만들어지는 경우가 많으니, 이 파일이 보일 때까지 폴더를 계속 들어가세요.
-   `setup-windows.ps1`·`README.md`·`precut` 폴더가 **함께** 보이면 그 위치가 맞습니다. (`precut` 폴더 안으로는 들어가지 마세요)
-3. `setup-windows.ps1` 을 **우클릭 → "PowerShell에서 실행"**.
+   `1-설치하기`·`2-영상처리하기`·`README.md`·`precut` 폴더가 **함께** 보이면 그 위치가 맞습니다.
+   (`precut` 폴더 안으로는 들어가지 마세요)
+3. **`1-설치하기` 를 더블클릭**합니다.
+4. 설치가 끝나면 **`2-영상처리하기` 를 더블클릭**하고, 영상 경로를 물어볼 때 파일을 창으로 끌어다 놓으면 됩니다.
 
-설치가 끝나면 이후로는 같은 폴더의 **`run-precut.ps1`** 을 우클릭 → "PowerShell에서 실행" 하면
-영상 경로를 물어보고 처리까지 안내해 줍니다.
+`.ps1` 파일을 직접 실행해도 되지만, 실행 정책이나 창이 바로 닫히는 문제를 피하려면 위 `.bat` 파일을 쓰세요.
 
 명령줄을 쓰고 싶다면:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup-windows.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-windows.ps1
 ```
 
 **macOS / Linux**
