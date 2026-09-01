@@ -13,6 +13,7 @@ from precut.cli import main
 from precut.config import build_settings
 from precut.media import MediaError, find_ffmpeg, probe
 from precut.pipeline import _transcribe_reporter, run_pipeline
+from precut.script import read_script
 from precut.transcribe import Transcript, TranscriptionUnavailable, Utterance, Word
 
 # 말 2초 / 무음 2초를 반복하고, 6초 이후에는 목소리가 작아지는 12초짜리 샘플
@@ -377,3 +378,81 @@ def test_cli_accepts_target_duration(sample_video, tmp_path, capsys):
     assert code == 0
     report = json.loads(capsys.readouterr().out)
     assert report["kept_duration"] < 7.0
+
+
+def test_keep_head_protects_the_opening(sample_video, tmp_path):
+    settings = base_settings(tmp_path)
+    settings.detect.threshold_db = -20.0  # 거의 다 무음으로 보게 해서 앞부분이 잘리도록
+    without = run_pipeline(sample_video, settings)
+
+    settings = base_settings(tmp_path)
+    settings.detect.threshold_db = -20.0
+    settings.shape.keep_head = 3.0
+    with_head = run_pipeline(sample_video, settings)
+
+    assert with_head.timeline.place()[0].segment.source_in == 0.0
+    assert with_head.timeline.duration > without.timeline.duration
+
+
+def test_keep_head_survives_target_duration(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    settings.shape.keep_head = 2.0
+    settings.shape.keep_tail = 1.0
+    settings.target_duration = 3.0
+    result = run_pipeline([sample_video, quiet_video], settings, merge=True)
+
+    placed = result.timeline.place()
+    assert placed[0].segment.source_in == 0.0
+    assert placed[0].item_index == 0
+    # 맨 끝 구간도 남아 있어야 한다
+    assert placed[-1].item_index == len(result.timeline.items) - 1
+
+
+def test_sentence_mode_cuts_on_utterance_boundaries(sample_video, tmp_path):
+    settings = base_settings(tmp_path)
+    settings.cut_by = "sentence"
+    result = run_pipeline(sample_video, settings, transcript=fake_transcript())
+
+    # 가짜 인식 결과의 말들이 있는 구간만 남는다
+    for clip in result.timeline.place():
+        assert clip.segment.duration > 0
+    assert result.timeline.duration < result.timeline.source_duration
+
+
+def test_script_file_is_written_and_reusable(sample_video, tmp_path):
+    settings = base_settings(tmp_path)
+    first = run_pipeline(sample_video, settings)
+    script = first.outputs["script"]
+    assert script.exists()
+
+    entries = read_script(script)
+    assert len(entries) == len(first.timeline.place())
+
+    # 첫 줄만 남기고 지운 대본으로 다시 만들면 그 구간만 남는다
+    kept = [line for line in script.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("[") or line.startswith("[001]")]
+    trimmed = tmp_path / "고친대본.txt"
+    trimmed.write_text("\n".join(kept), encoding="utf-8")
+
+    settings = base_settings(tmp_path)
+    settings.output.outdir = tmp_path / "out2"
+    settings.script_path = trimmed
+    second = run_pipeline(sample_video, settings)
+
+    assert len(second.timeline.place()) == 1
+    assert second.timeline.duration == pytest.approx(entries[0].duration, abs=0.1)
+
+
+def test_script_with_unknown_file_is_reported(sample_video, tmp_path):
+    script = tmp_path / "대본.txt"
+    script.write_text(
+        "[001] | 없는영상.mp4 | 00:00:01.00 - 00:00:03.00 | 2.0초 | 메모\n"
+        "[002] | sample.mp4 | 00:00:01.00 - 00:00:04.00 | 3.0초 | 남김\n",
+        encoding="utf-8",
+    )
+    settings = base_settings(tmp_path)
+    settings.script_path = script
+    result = run_pipeline(sample_video, settings)
+
+    assert any("처리 대상에 없는 파일" in warning for warning in result.warnings)
+    assert result.timeline.duration == pytest.approx(3.0, abs=0.1)

@@ -37,9 +37,12 @@ class ShapeOptions:
     min_clip: float = 0.30
     max_silence_keep: float = 0.0
     head_pad: float = 0.0
+    keep_head: float = 0.0
+    keep_tail: float = 0.0
 
     def validate(self) -> None:
-        for name in ("lead_in", "lead_out", "min_silence", "min_clip", "max_silence_keep"):
+        for name in ("lead_in", "lead_out", "min_silence", "min_clip", "max_silence_keep",
+                     "keep_head", "keep_tail"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name}은(는) 0 이상이어야 합니다")
 

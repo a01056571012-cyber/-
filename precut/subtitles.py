@@ -225,6 +225,25 @@ def wrap_lines(text: str, max_chars: int, max_lines: int) -> list[str]:
     return lines
 
 
+def regions_from_transcript(
+    transcript: Transcript, *, duration: float, lead_in: float = 0.2, lead_out: float = 0.3
+) -> list[tuple[float, float]]:
+    """인식된 문장 하나하나를 남길 구간으로 바꾼다.
+
+    소리 크기로 자르면 문장 중간이 잘려 맥락이 끊기지만, 문장 단위로 자르면
+    말이 끝난 자리에서만 컷이 생긴다.
+    """
+    regions: list[tuple[float, float]] = []
+    for utterance in transcript.utterances:
+        if not utterance.text.strip():
+            continue
+        start = max(0.0, utterance.start - lead_in)
+        end = min(duration, utterance.end + lead_out)
+        if end > start:
+            regions.append((start, end))
+    return sorted(regions)
+
+
 def render_srt(cues: list[Cue]) -> str:
     blocks = []
     for cue in cues:

@@ -21,7 +21,8 @@ from .loudness import LoudnessTrack, balance_plans, measure_track
 from .media import MediaError, MediaInfo, extract_analysis_wav, find_ffmpeg, probe
 from .render import measure_for_render, render_audio, render_preview
 from .segments import CutPlan, ShapeOptions, shape_regions
-from .subtitles import Cue, build_cues, write_srt, write_vtt
+from .script import ScriptEntry, group_by_source, read_script, write_script
+from .subtitles import Cue, build_cues, regions_from_transcript, write_srt, write_vtt
 from .timecode import format_duration
 from .timeline import Timeline, build_timeline
 from .transcribe import Transcript, TranscriptionUnavailable, transcribe
@@ -34,11 +35,14 @@ class SourceAnalysis:
     """원본 하나에 대한 분석 결과."""
 
     info: MediaInfo
-    plan: CutPlan
+    plan: CutPlan | None
     track: LoudnessTrack
     wav: Path
     envelope: Envelope
     threshold: Threshold
+    regions: list[tuple[float, float]] = field(default_factory=list)
+    protected: list[tuple[float, float]] = field(default_factory=list)
+    transcript: Transcript | None = None
 
 
 @dataclass
@@ -49,6 +53,7 @@ class Result:
     warnings: list[str] = field(default_factory=list)
     program_lufs: float | None = None
     transcript_backend: str = ""
+    script_entries: list[ScriptEntry] = field(default_factory=list)
 
     @property
     def sources(self) -> list[Path]:
@@ -182,16 +187,6 @@ def _analyze(source: Path, settings: Settings, workdir: Path, ffmpeg: str, index
     regions = silence_mod.detect_speech_regions(envelope, threshold)
     regions = silence_mod.refine_region_edges(envelope, regions, threshold)
 
-    plan = shape_regions(
-        regions, duration=info.duration, options=settings.shape, frame_rate=info.frame_rate
-    )
-    if not plan.segments:
-        warnings.append(f"{source.name}: 발화 구간을 찾지 못해 전체를 한 컷으로 유지합니다.")
-        plan = shape_regions(
-            [(0.0, info.duration)], duration=info.duration, options=settings.shape,
-            frame_rate=info.frame_rate,
-        )
-
     track = LoudnessTrack([])
     if settings.balance.enabled:
         progress("balance", f"[{source.name}] 구간별 라우드니스를 측정하는 중")
@@ -200,8 +195,8 @@ def _analyze(source: Path, settings: Settings, workdir: Path, ffmpeg: str, index
         except RuntimeError as exc:
             warnings.append(f"{source.name}: 라우드니스 측정 실패 ({exc})")
 
-    return SourceAnalysis(info=info, plan=plan, track=track, wav=wav,
-                          envelope=envelope, threshold=threshold)
+    return SourceAnalysis(info=info, plan=None, track=track, wav=wav,
+                          envelope=envelope, threshold=threshold, regions=regions)
 
 
 def _shape_with(analysis: SourceAnalysis, offset_db: float, shape: ShapeOptions) -> CutPlan:
@@ -213,6 +208,8 @@ def _shape_with(analysis: SourceAnalysis, offset_db: float, shape: ShapeOptions)
     )
     regions = detect_speech_regions(analysis.envelope, threshold)
     regions = refine_region_edges(analysis.envelope, regions, threshold)
+    if analysis.protected:
+        regions = sorted(regions + analysis.protected)
     return shape_regions(
         regions, duration=analysis.info.duration, options=shape,
         frame_rate=analysis.info.frame_rate,
@@ -260,6 +257,154 @@ def fit_to_target(analyses: list[SourceAnalysis], shape: ShapeOptions, target: f
     return best
 
 
+def _build_plans(analyses: list[SourceAnalysis], shape: ShapeOptions,
+                 warnings: list[str]) -> None:
+    for analysis in analyses:
+        plan = shape_regions(
+            analysis.regions, duration=analysis.info.duration, options=shape,
+            frame_rate=analysis.info.frame_rate,
+        )
+        if not plan.segments:
+            warnings.append(
+                f"{analysis.info.path.name}: 남길 구간을 찾지 못해 전체를 한 컷으로 유지합니다."
+            )
+            plan = shape_regions(
+                [(0.0, analysis.info.duration)], duration=analysis.info.duration,
+                options=shape, frame_rate=analysis.info.frame_rate,
+            )
+        analysis.plan = plan
+
+
+def _protect_edges(analyses: list[SourceAnalysis], shape: ShapeOptions) -> None:
+    """맨 앞 인사말과 맨 끝 마무리가 잘려나가지 않도록 통째로 지킨다."""
+    if not analyses:
+        return
+    if shape.keep_head > 0:
+        first = analyses[0]
+        first.protected.append((0.0, min(shape.keep_head, first.info.duration)))
+    if shape.keep_tail > 0:
+        last = analyses[-1]
+        last.protected.append((max(0.0, last.info.duration - shape.keep_tail), last.info.duration))
+    for analysis in analyses:
+        if analysis.protected:
+            analysis.regions = sorted(analysis.regions + analysis.protected)
+
+
+def _regions_from_sentences(analyses: list[SourceAnalysis], settings: Settings,
+                            progress: Progress, warnings: list[str],
+                            supplied: Transcript | None) -> None:
+    """음성을 인식해 문장 단위로 남길 구간을 잡는다."""
+    for index, analysis in enumerate(analyses):
+        name = analysis.info.path.name
+        progress("subtitle", f"[{name}] 문장을 찾기 위해 음성을 인식하는 중")
+        try:
+            analysis.transcript = supplied if supplied is not None else transcribe(
+                analysis.wav, settings.transcribe,
+                progress=_transcribe_reporter(name, progress),
+            )
+        except Exception as exc:
+            warnings.append(
+                f"{name}: 음성 인식에 실패해 무음 기준으로 자릅니다 ({exc})"
+            )
+            continue
+        regions = regions_from_transcript(
+            analysis.transcript, duration=analysis.info.duration,
+            lead_in=settings.shape.lead_in, lead_out=settings.shape.lead_out,
+        )
+        if regions:
+            analysis.regions = regions
+        else:
+            warnings.append(f"{name}: 인식된 말이 없어 무음 기준으로 자릅니다.")
+
+
+def _regions_from_script(analyses: list[SourceAnalysis], entries: list[ScriptEntry],
+                         warnings: list[str]) -> None:
+    """대본에 남아 있는 줄만 그대로 사용한다."""
+    grouped = group_by_source(entries)
+    unknown = set(grouped) - {analysis.info.path.name for analysis in analyses}
+    if unknown:
+        warnings.append(f"대본에 있지만 처리 대상에 없는 파일: {', '.join(sorted(unknown))}")
+    for analysis in analyses:
+        spans = grouped.get(analysis.info.path.name, [])
+        analysis.regions = [
+            (max(0.0, start), min(analysis.info.duration, end))
+            for start, end in spans
+            if end > start
+        ]
+        if not spans:
+            warnings.append(f"{analysis.info.path.name}: 대본에 남은 구간이 없습니다.")
+
+
+def _fit(analyses: list[SourceAnalysis], settings: Settings, shape: ShapeOptions,
+         progress: Progress, warnings: list[str]) -> None:
+    target = settings.target_duration
+    progress("fit", f"목표 길이 {format_duration(target)}에 맞추는 중")
+
+    if settings.cut_by == "sentence" or settings.script_path:
+        # 문장 단위로 잡았을 때는 임계값을 건드리지 않고 문장을 통째로 덜어낸다.
+        removed = _drop_shortest(analyses, shape, target)
+        _build_plans(analyses, shape, warnings)
+        total = sum(a.plan.kept_duration for a in analyses if a.plan)
+        progress("fit", f"짧은 문장 {removed}개를 덜어내 {format_duration(total)}")
+    else:
+        plans, offset, used_shape = fit_to_target(analyses, shape, target)
+        for analysis, plan in zip(analyses, plans):
+            analysis.plan = plan
+        total = sum(plan.kept_duration for plan in plans)
+        progress(
+            "fit",
+            f"임계값 {offset:+.1f}dB 조정 → {format_duration(total)} "
+            f"(여유 {used_shape.lead_in:.2f}/{used_shape.lead_out:.2f}초)",
+        )
+
+    if total > target * 1.05:
+        warnings.append(
+            f"{format_duration(target)}까지 줄일 수 없어 {format_duration(total)}가 한계입니다. "
+            "남길 내용이 그만큼 많습니다."
+        )
+    elif total < target * 0.8:
+        warnings.append(
+            f"목표 {format_duration(target)}보다 짧은 {format_duration(total)}가 됐습니다."
+        )
+
+
+def _drop_shortest(analyses: list[SourceAnalysis], shape: ShapeOptions, target: float) -> int:
+    """짧은 구간부터 통째로 덜어내 목표 길이에 맞춘다.
+
+    짧은 말일수록 추임새나 말 끊김일 가능성이 높다. 문장 중간을 자르지 않으므로
+    남은 부분은 맥락이 유지된다. 앞뒤로 지키기로 한 구간은 건드리지 않는다.
+    """
+    head_limit = shape.keep_head
+    protected: list[tuple[int, int]] = []
+    candidates: list[tuple[float, int, int]] = []
+
+    for source_index, analysis in enumerate(analyses):
+        tail_start = analysis.info.duration - shape.keep_tail
+        for region_index, (start, end) in enumerate(analysis.regions):
+            is_head = source_index == 0 and start < head_limit
+            is_tail = source_index == len(analyses) - 1 and shape.keep_tail > 0 and end > tail_start
+            if is_head or is_tail:
+                protected.append((source_index, region_index))
+            else:
+                candidates.append((end - start, source_index, region_index))
+
+    total = sum(end - start for a in analyses for start, end in a.regions)
+    candidates.sort()
+    dropped: set[tuple[int, int]] = set()
+    for length, source_index, region_index in candidates:
+        if total <= target:
+            break
+        dropped.add((source_index, region_index))
+        total -= length
+
+    for source_index, analysis in enumerate(analyses):
+        analysis.regions = [
+            span for region_index, span in enumerate(analysis.regions)
+            if (source_index, region_index) not in dropped
+        ]
+    return len(dropped)
+
+
 def run_pipeline(
     sources: Path | Sequence[Path],
     settings: Settings,
@@ -296,30 +441,25 @@ def run_pipeline(
             for index, path in enumerate(paths)
         ]
 
+        script_entries = None
+        if settings.script_path:
+            progress("script", f"대본을 읽는 중: {Path(settings.script_path).name}")
+            script_entries = read_script(Path(settings.script_path))
+
+        shape = settings.shape
+        if script_entries is not None:
+            _regions_from_script(analyses, script_entries, warnings)
+            # 대본의 구간은 사람이 정한 값이므로 여유를 덧붙이지 않고 그대로 쓴다.
+            shape = replace(shape, lead_in=0.0, lead_out=0.0, min_silence=0.0,
+                            min_clip=0.0, max_silence_keep=0.0)
+        elif settings.cut_by == "sentence":
+            _regions_from_sentences(analyses, settings, progress, warnings, transcript)
+
+        _protect_edges(analyses, shape)
+        _build_plans(analyses, shape, warnings)
+
         if settings.target_duration:
-            progress("fit", f"목표 길이 {format_duration(settings.target_duration)}에 맞추는 중")
-            plans, offset, used_shape = fit_to_target(
-                analyses, settings.shape, settings.target_duration
-            )
-            for analysis, plan in zip(analyses, plans):
-                analysis.plan = plan
-            total = sum(plan.kept_duration for plan in plans)
-            progress(
-                "fit",
-                f"임계값 {offset:+.1f}dB 조정 → {format_duration(total)} "
-                f"(여유 {used_shape.lead_in:.2f}/{used_shape.lead_out:.2f}초)",
-            )
-            if total > settings.target_duration * 1.05:
-                warnings.append(
-                    f"무음만 잘라서는 {format_duration(settings.target_duration)}까지 줄일 수 없어 "
-                    f"{format_duration(total)}가 한계입니다. 소리가 있는 구간이 그만큼 많습니다."
-                )
-            elif total < settings.target_duration * 0.8:
-                warnings.append(
-                    f"목표 {format_duration(settings.target_duration)}보다 짧은 "
-                    f"{format_duration(total)}가 됐습니다. 소리 크기가 고르게 나뉘지 않아 "
-                    "중간 지점을 찾기 어려운 소재입니다."
-                )
+            _fit(analyses, settings, shape, progress, warnings)
 
         _, program_lufs = balance_plans(
             [(item.plan, item.track) for item in analyses], settings.balance
@@ -344,6 +484,8 @@ def run_pipeline(
             program_lufs=program_lufs,
             transcript_backend=backend,
         )
+
+        result.script_entries = _script_entries(timeline, analyses)
 
         progress("export", "편집 파일을 쓰는 중")
         _export(result, settings, outdir, workdir, ffmpeg, default_name)
@@ -385,16 +527,19 @@ def _make_subtitles(analyses: list[SourceAnalysis], timeline: Timeline, settings
     backend = ""
     for index, analysis in enumerate(analyses):
         name = analysis.info.path.name
-        progress(
-            "subtitle",
-            f"[{name}] 인식 모델({settings.transcribe.model})을 준비하는 중 "
-            "— 처음 한 번은 내려받느라 몇 분 걸립니다",
-        )
-        try:
-            transcript = supplied if supplied is not None else transcribe(
-                analysis.wav, settings.transcribe,
-                progress=_transcribe_reporter(name, progress),
+        if supplied is None and analysis.transcript is None:
+            progress(
+                "subtitle",
+                f"[{name}] 인식 모델({settings.transcribe.model})을 준비하는 중 "
+                "— 처음 한 번은 내려받느라 몇 분 걸립니다",
             )
+        try:
+            transcript = supplied or analysis.transcript
+            if transcript is None:
+                transcript = transcribe(
+                    analysis.wav, settings.transcribe,
+                    progress=_transcribe_reporter(name, progress),
+                )
             backend = transcript.backend
             progress("subtitle", f"[{name}] 음성 인식 완료")
             cues.extend(
@@ -415,6 +560,34 @@ def _make_subtitles(analyses: list[SourceAnalysis], timeline: Timeline, settings
     for position, cue in enumerate(cues, start=1):
         cue.index = position
     return cues, backend
+
+
+def _script_entries(timeline: Timeline, analyses: list[SourceAnalysis]) -> list[ScriptEntry]:
+    """편집 결과를 사람이 고칠 수 있는 대본 항목으로 옮긴다."""
+    entries: list[ScriptEntry] = []
+    for index, clip in enumerate(timeline.place(), start=1):
+        analysis = analyses[clip.item_index]
+        text = ""
+        if analysis.transcript is not None:
+            spoken = [
+                utterance.text.strip()
+                for utterance in analysis.transcript.utterances
+                if utterance.end > clip.segment.source_in
+                and utterance.start < clip.segment.source_out
+            ]
+            text = " ".join(spoken)
+            if len(text) > 120:
+                text = text[:117] + "..."
+        entries.append(
+            ScriptEntry(
+                index=index,
+                source=clip.item.info.path.name,
+                start=clip.segment.source_in,
+                end=clip.segment.source_out,
+                text=text,
+            )
+        )
+    return entries
 
 
 def _export(result: Result, settings: Settings, outdir: Path, workdir: Path, ffmpeg: str,
@@ -476,6 +649,11 @@ def _export(result: Result, settings: Settings, outdir: Path, workdir: Path, ffm
             sequence_name=sequence_name,
             srt_path=srt_path,
             audio_path=audio_path,
+        )
+
+    if out.write_script and result.script_entries:
+        result.outputs["script"] = write_script(
+            result.script_entries, outdir / f"{prefix}_대본.txt"
         )
 
     if out.write_report:

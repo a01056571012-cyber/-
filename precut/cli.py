@@ -23,6 +23,9 @@ EPILOG = """
   precut a.mp4 --dry-run                  파일을 만들지 않고 컷 결과만 미리보기
   precut ./영상폴더 --merge                폴더 안 영상을 하나의 시퀀스로 이어붙이기
   precut ./영상폴더 --merge -t 30m         목표 30분에 맞춰 자동으로 더 잘라내기
+  precut ./영상폴더 --merge --cut-by sentence --keep-head 20s
+                                          문장 단위로 자르고 앞 20초는 통째로 남기기
+  precut ./영상폴더 --merge --script 대본.txt  대본에서 고른 구간만으로 다시 만들기
 
 프리미어에서 열기:
   1) 만들어진 .xml 을 프리미어에서 파일 > 가져오기
@@ -65,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:
     cut.add_argument(
         "-t", "--target-duration", metavar="시간",
         help="목표 길이에 맞춰 자동으로 더 잘라냄 (예: 30m, 1h20m, 1:30:00)",
+    )
+    cut.add_argument(
+        "--cut-by", choices=("silence", "sentence"), default=None,
+        help="silence=소리 크기 기준(기본), sentence=말한 문장 단위로 (음성 인식 필요)",
+    )
+    cut.add_argument("--keep-head", metavar="시간", help="맨 앞 이만큼은 무조건 남김 (예: 20s)")
+    cut.add_argument("--keep-tail", metavar="시간", help="맨 끝 이만큼은 무조건 남김")
+    cut.add_argument(
+        "--script", type=Path, metavar="대본.txt",
+        help="대본에 남아 있는 구간만으로 편집본을 다시 만듦",
     )
 
     balance = parser.add_argument_group("소리 밸런스")
@@ -168,6 +181,14 @@ def apply_args(settings, args) -> None:
 
     if args.target_duration:
         settings.target_duration = parse_duration(args.target_duration)
+    if args.cut_by:
+        settings.cut_by = args.cut_by
+    if args.keep_head:
+        settings.shape.keep_head = parse_duration(args.keep_head)
+    if args.keep_tail:
+        settings.shape.keep_tail = parse_duration(args.keep_tail)
+    if args.script:
+        settings.script_path = args.script
 
     if args.dry_run:
         output.write_xml = False
@@ -176,6 +197,7 @@ def apply_args(settings, args) -> None:
         output.write_srt = False
         output.write_vtt = False
         output.write_report = False
+        output.write_script = False
         output.render_preview = False
         output.render_audio = False
 

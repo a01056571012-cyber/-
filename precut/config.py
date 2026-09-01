@@ -35,6 +35,7 @@ class OutputOptions:
     write_srt: bool = True
     write_vtt: bool = False
     write_report: bool = True
+    write_script: bool = True
     render_preview: bool = False
     render_audio: bool = False
     burn_subtitles: bool = False
@@ -53,6 +54,8 @@ class Settings:
     output: OutputOptions = field(default_factory=OutputOptions)
     make_subtitles: bool = True
     target_duration: float | None = None
+    cut_by: str = "silence"  # silence | sentence
+    script_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)

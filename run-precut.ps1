@@ -71,19 +71,52 @@ function Invoke-Precut {
     }
     Write-Ok $preset
 
-    Write-Step "얼마나 잘리는지 먼저 확인합니다 (파일은 만들지 않음)"
-    & $precut $target ($mergeOption + @("--preset", $preset, "--no-subtitles", "--dry-run"))
-    if ($LASTEXITCODE -ne 0) { throw "분석에 실패했습니다. 위 메시지를 확인하세요." }
+    $extra = @()
 
-    Write-Host ""
-    $answer = Read-Host "이대로 편집 파일을 만들까요? (Y/N)"
-    if ($answer -notmatch "^[Yy]") {
-        Write-Host "취소했습니다. 컷이 과하면 gentle, 부족하면 tight 프리셋으로 다시 시도해 보세요." -ForegroundColor Yellow
-        return
+    Write-Step "맨 앞을 지킬까요"
+    Write-Host "   영상 맨 앞 인사말이 잘려나가지 않도록 통째로 남길 수 있습니다."
+    $headAnswer = (Read-Host "맨 앞 몇 초를 남길까요? (그냥 Enter 치면 20초, 0이면 안 남김)").Trim()
+    if (-not $headAnswer) { $headAnswer = "20" }
+    if ($headAnswer -match "^\d+$" -and [int]$headAnswer -gt 0) {
+        $extra += @("--keep-head", "$($headAnswer)s")
+        Write-Ok "앞 $($headAnswer)초를 지킵니다"
+    }
+
+    Write-Step "자르는 기준"
+    Write-Host "   1. 소리 기준 (빠름, 기본)"
+    Write-Host "      - 소리가 작은 곳을 잘라냅니다. 말 중간에서 잘릴 수 있습니다."
+    Write-Host "   2. 문장 기준 (맥락 유지)"
+    Write-Host "      - 말이 끝난 자리에서만 자릅니다. 음성 인식이 필요해 오래 걸립니다."
+    $cutChoice = Read-Host "번호 (그냥 Enter 치면 1)"
+    $bySentence = $cutChoice -eq "2"
+    if ($bySentence) {
+        $extra += @("--cut-by", "sentence")
+        Write-Ok "문장 기준"
+    }
+
+    Write-Step "목표 길이"
+    Write-Host "   원하는 길이를 정하면 거기에 맞춰 더 잘라냅니다. (예: 30m, 1h20m)"
+    $targetAnswer = (Read-Host "목표 길이 (그냥 Enter 치면 무음만 제거)").Trim()
+    if ($targetAnswer) {
+        $extra += @("-t", $targetAnswer)
+        Write-Ok $targetAnswer
+    }
+
+    if (-not $bySentence) {
+        Write-Step "얼마나 잘리는지 먼저 확인합니다 (파일은 만들지 않음)"
+        & $precut $target ($mergeOption + $extra + @("--preset", $preset, "--no-subtitles", "--dry-run"))
+        if ($LASTEXITCODE -ne 0) { throw "분석에 실패했습니다. 위 메시지를 확인하세요." }
+
+        Write-Host ""
+        $answer = Read-Host "이대로 편집 파일을 만들까요? (Y/N)"
+        if ($answer -notmatch "^[Yy]") {
+            Write-Host "취소했습니다. 컷이 과하면 gentle, 부족하면 tight 프리셋으로 다시 시도해 보세요." -ForegroundColor Yellow
+            return
+        }
     }
 
     $subtitleAnswer = Read-Host "자막도 만들까요? (Y/N)"
-    $options = $mergeOption + @("--preset", $preset)
+    $options = $mergeOption + $extra + @("--preset", $preset)
     if ($subtitleAnswer -match "^[Yy]") {
         Write-Step "자막 정확도 고르기"
         Write-Host "   1. 빠름   (small)     10분 영상에 약 3~8분, 모델 0.5GB (기본)"
@@ -120,6 +153,8 @@ function Invoke-Precut {
     Write-Host ""
     Write-Host "끝났습니다." -ForegroundColor Green
     Write-Host "결과물은 원본 영상 옆의 '<파일이름>_precut' 폴더에 있습니다." -ForegroundColor White
+    Write-Host "그 안의 '_대본.txt' 를 열어 필요 없는 줄을 지우고 다시 넣으면" -ForegroundColor White
+    Write-Host "고른 구간만으로 편집본을 다시 만들 수 있습니다." -ForegroundColor White
     Write-Host "프리미어에서 파일 > 가져오기 로 그 안의 .xml 을 열면 컷이 적용된 시퀀스가 나옵니다." -ForegroundColor White
     Write-Host ""
 
