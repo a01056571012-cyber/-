@@ -168,3 +168,22 @@ def test_merged_edl_labels_each_reel(tmp_path):
     assert "TITLE: 합본" in text
     assert text.count("FROM CLIP NAME: A.mp4") == 2
     assert text.count("FROM CLIP NAME: B.mp4") == 1
+
+
+def test_pathurl_uses_the_form_premiere_writes(tmp_path):
+    root = ET.fromstring(render_fcpxml(two_clip_timeline(tmp_path)))
+    url = root.find(".//file/pathurl").text
+    # 프리미어는 file://localhost/ 형식만 확실히 읽는다 (file:///C:/... 는 오프라인이 됐다)
+    assert url.startswith("file://localhost/")
+    assert "//localhost//" not in url
+
+
+def test_pathurl_escapes_spaces_and_hangul(tmp_path):
+    folder = tmp_path / "바탕 화면"
+    folder.mkdir()
+    info = make_info(folder, "촬영 본.mp4")
+    root = ET.fromstring(render_fcpxml(build_timeline([(info, make_plan([(1.0, 3.0)]))])))
+    url = root.find(".//file/pathurl").text
+    assert " " not in url
+    assert "%20" in url
+    assert "촬영" not in url  # 한글은 퍼센트 인코딩된다

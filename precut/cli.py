@@ -12,7 +12,7 @@ from . import __version__
 from .config import PRESETS, build_settings
 from .media import MediaError
 from .pipeline import run_pipeline
-from .timecode import format_duration
+from .timecode import format_duration, parse_duration
 
 EPILOG = """
 예시:
@@ -22,6 +22,7 @@ EPILOG = """
   precut a.mp4 --render-preview           확인용 미리보기 영상까지 렌더링
   precut a.mp4 --dry-run                  파일을 만들지 않고 컷 결과만 미리보기
   precut ./영상폴더 --merge                폴더 안 영상을 하나의 시퀀스로 이어붙이기
+  precut ./영상폴더 --merge -t 30m         목표 30분에 맞춰 자동으로 더 잘라내기
 
 프리미어에서 열기:
   1) 만들어진 .xml 을 프리미어에서 파일 > 가져오기
@@ -61,6 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     cut.add_argument("--audio-transition", type=int, metavar="FRAMES", help="오디오 크로스페이드 프레임")
     cut.add_argument("--video-transition", type=int, metavar="FRAMES", help="영상 디졸브 프레임")
     cut.add_argument("--no-transitions", action="store_true", help="트랜지션 없이 하드컷")
+    cut.add_argument(
+        "-t", "--target-duration", metavar="시간",
+        help="목표 길이에 맞춰 자동으로 더 잘라냄 (예: 30m, 1h20m, 1:30:00)",
+    )
 
     balance = parser.add_argument_group("소리 밸런스")
     balance.add_argument("--no-balance", action="store_true", help="구간별 볼륨 보정 끄기")
@@ -160,6 +165,9 @@ def apply_args(settings, args) -> None:
     if args.target_lufs is not None:
         settings.render.target_i = args.target_lufs
         settings.balance.target_lufs = args.target_lufs
+
+    if args.target_duration:
+        settings.target_duration = parse_duration(args.target_duration)
 
     if args.dry_run:
         output.write_xml = False

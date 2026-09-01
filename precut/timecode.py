@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 NTSC_TIMEBASES = {24: 23.976023976023978, 30: 29.97002997002997, 60: 59.94005994005994}
@@ -104,6 +105,32 @@ def srt_timestamp(seconds: float) -> str:
 
 def vtt_timestamp(seconds: float) -> str:
     return srt_timestamp(seconds).replace(",", ".")
+
+
+_DURATION_RE = re.compile(
+    r"^(?:(?P<h>\d+):)?(?:(?P<m>\d+):)?(?P<s>\d+(?:\.\d+)?)$"
+)
+
+
+def parse_duration(text: str) -> float:
+    """'90', '30m', '1h20m', '0:30', '1:02:03.5' 를 초로 바꾼다."""
+    cleaned = text.strip().lower().replace(" ", "")
+    if not cleaned:
+        raise ValueError("시간이 비어 있습니다")
+
+    unit_match = re.fullmatch(r"(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?", cleaned)
+    if unit_match and any(unit_match.groups()):
+        hours, minutes, seconds = (float(g or 0) for g in unit_match.groups())
+        return hours * 3600 + minutes * 60 + seconds
+
+    match = _DURATION_RE.match(cleaned)
+    if not match:
+        raise ValueError(f"시간 형식을 해석할 수 없습니다: {text!r}")
+    hours = float(match.group("h") or 0)
+    minutes = float(match.group("m") or 0)
+    if match.group("h") and not match.group("m"):
+        hours, minutes = 0.0, hours
+    return hours * 3600 + minutes * 60 + float(match.group("s"))
 
 
 def format_duration(seconds: float) -> str:

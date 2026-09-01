@@ -52,6 +52,7 @@ class Settings:
     render: RenderOptions = field(default_factory=RenderOptions)
     output: OutputOptions = field(default_factory=OutputOptions)
     make_subtitles: bool = True
+    target_duration: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _serialize(self)

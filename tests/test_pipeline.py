@@ -347,3 +347,33 @@ def test_transcribe_reporter_shows_remaining_time(sample_video, tmp_path):
     report = _transcribe_reporter("a.mp4", lambda stage, text: messages.append(text), step=50)
     report(90.0, 180.0)
     assert "1:30.0 / 3:00.0" in messages[0]
+
+
+def test_target_duration_shortens_the_result(sample_video, quiet_video, tmp_path):
+    settings = base_settings(tmp_path)
+    natural = run_pipeline([sample_video, quiet_video], settings, merge=True).timeline.duration
+
+    settings = base_settings(tmp_path)
+    settings.target_duration = natural * 0.5
+    result = run_pipeline([sample_video, quiet_video], settings, merge=True)
+
+    assert result.timeline.duration < natural
+    assert result.timeline.duration <= natural * 0.75
+
+
+def test_target_longer_than_possible_keeps_the_natural_cut(sample_video, tmp_path):
+    settings = base_settings(tmp_path)
+    natural = run_pipeline(sample_video, settings).timeline.duration
+
+    settings = base_settings(tmp_path)
+    settings.target_duration = 3600.0
+    result = run_pipeline(sample_video, settings)
+    assert result.timeline.duration == pytest.approx(natural, abs=0.5)
+
+
+def test_cli_accepts_target_duration(sample_video, tmp_path, capsys):
+    code = main([str(sample_video), "--no-subtitles", "-t", "4s", "--json",
+                 "-o", str(tmp_path / "t")])
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["kept_duration"] < 7.0

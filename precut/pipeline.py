@@ -11,6 +11,8 @@ from typing import Callable, Sequence
 
 from . import audio as audio_mod
 from . import silence as silence_mod
+from .audio import Envelope
+from .silence import Threshold, detect_speech_regions, refine_region_edges
 from .config import Settings
 from .exporters.edl import write_edl
 from .exporters.fcpxml import write_fcpxml
@@ -18,7 +20,7 @@ from .exporters.jsx import write_jsx
 from .loudness import LoudnessTrack, balance_plans, measure_track
 from .media import MediaError, MediaInfo, extract_analysis_wav, find_ffmpeg, probe
 from .render import measure_for_render, render_audio, render_preview
-from .segments import CutPlan, shape_regions
+from .segments import CutPlan, ShapeOptions, shape_regions
 from .subtitles import Cue, build_cues, write_srt, write_vtt
 from .timecode import format_duration
 from .timeline import Timeline, build_timeline
@@ -35,6 +37,8 @@ class SourceAnalysis:
     plan: CutPlan
     track: LoudnessTrack
     wav: Path
+    envelope: Envelope
+    threshold: Threshold
 
 
 @dataclass
@@ -196,7 +200,64 @@ def _analyze(source: Path, settings: Settings, workdir: Path, ffmpeg: str, index
         except RuntimeError as exc:
             warnings.append(f"{source.name}: 라우드니스 측정 실패 ({exc})")
 
-    return SourceAnalysis(info=info, plan=plan, track=track, wav=wav)
+    return SourceAnalysis(info=info, plan=plan, track=track, wav=wav,
+                          envelope=envelope, threshold=threshold)
+
+
+def _shape_with(analysis: SourceAnalysis, offset_db: float, shape: ShapeOptions) -> CutPlan:
+    """임계값을 offset_db 만큼 올려/내려 다시 컷을 잡는다."""
+    threshold = replace(
+        analysis.threshold,
+        open_db=analysis.threshold.open_db + offset_db,
+        close_db=analysis.threshold.close_db + offset_db,
+    )
+    regions = detect_speech_regions(analysis.envelope, threshold)
+    regions = refine_region_edges(analysis.envelope, regions, threshold)
+    return shape_regions(
+        regions, duration=analysis.info.duration, options=shape,
+        frame_rate=analysis.info.frame_rate,
+    )
+
+
+def fit_to_target(analyses: list[SourceAnalysis], shape: ShapeOptions, target: float,
+                  *, tolerance: float = 0.03) -> tuple[list[CutPlan], float, ShapeOptions]:
+    """목표 길이에 가장 가깝도록 무음 임계값(필요하면 여유까지)을 자동으로 조절한다.
+
+    임계값을 올릴수록 더 많은 소리가 무음으로 판정되어 결과가 짧아진다. 임계값만으로
+    부족하면 앞뒤 여유와 최소 무음 길이까지 단계적으로 줄인다. 엔벨로프는 이미
+    계산되어 있으므로 다시 훑기만 하면 되고, 오디오를 다시 읽지는 않는다.
+    """
+    attempts = [
+        shape,
+        replace(shape, lead_in=shape.lead_in * 0.5, lead_out=shape.lead_out * 0.5,
+                min_silence=max(0.15, shape.min_silence * 0.6)),
+        # 마지막 단계에서는 최소 컷 길이를 오히려 늘린다. 짧은 조각이 사라지면서
+        # 길이는 더 줄고, 결과도 잘게 튀지 않아 보기 편해진다.
+        replace(shape, lead_in=shape.lead_in * 0.2, lead_out=shape.lead_out * 0.2,
+                min_silence=0.12, min_clip=max(shape.min_clip, 0.6)),
+    ]
+
+    best: tuple[list[CutPlan], float, ShapeOptions] | None = None
+    best_gap = float("inf")
+
+    for options in attempts:
+        low, high = -15.0, 30.0
+        for _ in range(18):
+            middle = (low + high) / 2
+            plans = [_shape_with(analysis, middle, options) for analysis in analyses]
+            total = sum(plan.kept_duration for plan in plans)
+            gap = abs(total - target)
+            if gap < best_gap:
+                best, best_gap = (plans, middle, options), gap
+            if total > target:
+                low = middle
+            else:
+                high = middle
+        if best is not None and best_gap <= target * tolerance:
+            break
+
+    assert best is not None
+    return best
 
 
 def run_pipeline(
@@ -234,6 +295,31 @@ def run_pipeline(
             _analyze(path, settings, workdir, ffmpeg, index, progress, warnings)
             for index, path in enumerate(paths)
         ]
+
+        if settings.target_duration:
+            progress("fit", f"목표 길이 {format_duration(settings.target_duration)}에 맞추는 중")
+            plans, offset, used_shape = fit_to_target(
+                analyses, settings.shape, settings.target_duration
+            )
+            for analysis, plan in zip(analyses, plans):
+                analysis.plan = plan
+            total = sum(plan.kept_duration for plan in plans)
+            progress(
+                "fit",
+                f"임계값 {offset:+.1f}dB 조정 → {format_duration(total)} "
+                f"(여유 {used_shape.lead_in:.2f}/{used_shape.lead_out:.2f}초)",
+            )
+            if total > settings.target_duration * 1.05:
+                warnings.append(
+                    f"무음만 잘라서는 {format_duration(settings.target_duration)}까지 줄일 수 없어 "
+                    f"{format_duration(total)}가 한계입니다. 소리가 있는 구간이 그만큼 많습니다."
+                )
+            elif total < settings.target_duration * 0.8:
+                warnings.append(
+                    f"목표 {format_duration(settings.target_duration)}보다 짧은 "
+                    f"{format_duration(total)}가 됐습니다. 소리 크기가 고르게 나뉘지 않아 "
+                    "중간 지점을 찾기 어려운 소재입니다."
+                )
 
         _, program_lufs = balance_plans(
             [(item.plan, item.track) for item in analyses], settings.balance

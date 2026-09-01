@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,17 @@ def _ticks(seconds: float) -> int:
     return int(round(seconds * PPRO_TICKS_PER_SECOND))
 
 
+def pathurl(path: Path) -> str:
+    """프리미어가 스스로 내보내는 형식과 같은 file://localhost/ URL.
+
+    Path.as_uri()가 만드는 file:///C:/... 형태를 프리미어가 못 읽는 경우가 있어
+    윈도우 프리미어가 쓰는 표기를 그대로 따른다.
+    """
+    text = str(path.resolve()).replace("\\", "/")
+    quoted = urllib.parse.quote(text, safe="/:")
+    return "file://localhost/" + quoted.lstrip("/")
+
+
 def _file_element(parent: ET.Element, info: MediaInfo, file_id: str, audio_channels: int,
                   *, full: bool) -> ET.Element:
     """파일은 처음 한 번만 전체 정의하고, 이후에는 id로만 참조한다."""
@@ -64,7 +76,7 @@ def _file_element(parent: ET.Element, info: MediaInfo, file_id: str, audio_chann
     frame_rate = info.frame_rate
     file_el = _sub(parent, "file", id=file_id)
     _sub(file_el, "name", info.path.name)
-    _sub(file_el, "pathurl", info.path.resolve().as_uri())
+    _sub(file_el, "pathurl", pathurl(info.path))
     _rate(file_el, frame_rate)
     _sub(file_el, "duration", frame_rate.to_frames(info.duration))
     _timecode(file_el, frame_rate)
